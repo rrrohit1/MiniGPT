@@ -70,14 +70,18 @@ class BiGramLanguageModel(nn.Module):
         super().__init__()
         # Each token directly reads off the logits of the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
+        self.position_embedding_table = nn.Embedding(block_size, n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
     def forward(self, idx, targets=None):
+        B, T = idx.shape
 
         # idx and targets are both (B, T) tensor of integers
         # Basically we are passing the input idx to get the logits for next token prediction
         tok_emb = self.token_embedding_table(idx) # (B, T, C) = (batch_size, time = block_size, channel = n_embed)
-        logits = self.lm_head(tok_emb) # (B, T, C) = (batch_size, time = block_size, channel = vocab_size)
+        pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T, C)
+        x = tok_emb + pos_emb # (B, T, C)
+        logits = self.lm_head(x) # (B, T, vocab_size)
 
         if targets is None: # If no targets provided, we are in generation mode
             loss = None
