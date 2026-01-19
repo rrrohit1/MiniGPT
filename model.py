@@ -94,9 +94,12 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, head_size):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.proj = nn.Linear(n_embd, n_embd)
 
     def forward(self, x):
-        return torch.cat([h(x) for h in self.heads], dim=-1)
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        out = self.proj(out)
+        return out
 
 # This is applied to a token indiviually and identically
 class FeedForward(nn.Module):
@@ -104,13 +107,30 @@ class FeedForward(nn.Module):
 
     def __init__(self, n_embd):
         super().__init__()
+        # here we project to a higher dimension, apply ReLU non-linearity, and project back to the original dimension
+        # In attention paper, they grow from 512 to 2048 and back to 512 (4x)
         self.net = nn.Sequential(
-            nn.Linear(n_embd, n_embd),
+            nn.Linear(n_embd, 4* n_embd),
             nn.ReLU(),
+            nn.Linear(4* n_embd, n_embd), # projection layer back into residual pathway
         )
 
     def forward(self, x):
         return self.net(x)
+
+class Block(nn.Module):
+    """ Transformer block: communication followed by computation """
+
+    def __init__(self, n_embd, n_head):
+        super().__init__()
+        self.sa = MultiHeadAttention(n_head, n_embd//n_head) # 4 heads of self-attention
+        self.ffwd = FeedForward(n_embd)
+
+    def forward(self, x):
+        x = x + self.sa(x) # residual connection
+        x = x + self.ffwd(x) # residual connection: fork off do some computation and add back
+        return x
+
 
 # simple bigram model
 class BiGramLanguageModel(nn.Module):
@@ -120,8 +140,11 @@ class BiGramLanguageModel(nn.Module):
         # Each token directly reads off the logits of the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
-        self.sa_heads = MultiHeadAttention(4, n_embd//4) # 4 heads of 8-deminsional self-attention
-        self.ffwd = FeedForward(n_embd)
+        self.blocks = nn.Sequential(
+            Block(n_embd, 4),
+            Block(n_embd, 4),
+            Block(n_embd, 4),
+        ) # 3 transformer blocks
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
     def forward(self, idx, targets=None):
@@ -132,8 +155,7 @@ class BiGramLanguageModel(nn.Module):
         tok_emb = self.token_embedding_table(idx) # (B, T, C) = (batch_size, time = block_size, channel = n_embed)
         pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T, C)
         x = tok_emb + pos_emb # (B, T, C)
-        x = self.sa_heads(x) # apply one head of self-attention (B, T, C)
-        x = self.ffwd(x) # (B, T, C)
+        x = self.blocks(x) # (B, T, C)
         logits = self.lm_head(x) # (B, T, vocab_size)
 
         if targets is None: # If no targets provided, we are in generation mode
