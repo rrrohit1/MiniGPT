@@ -12,6 +12,9 @@ learning_rate = 1e-3
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
 n_embd = 32
+n_head = 8 # n_embd needs to be divisible by n_head
+n_layer = 6
+dropout = 0.2 # at training time, neurons are disabled to develop sub-networks which improves generalization --> enabled at test time
 # ------------
 
 
@@ -73,6 +76,8 @@ class Head(nn.Module):
         self.value = nn.Linear(n_embd, head_size, bias=False)
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
 
+        self.dropout = nn.Dropout(dropout)
+
     def forward(self, x):
         B, T, C = x.shape
         k = self.key(x)   # (B, T, C)
@@ -82,6 +87,8 @@ class Head(nn.Module):
         wei = q @ k.transpose(-2, -1) * C**-0.5 # (B, T, C) @ (B, C, T) --> (B, T, T)
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T)
         wei = F.softmax(wei, dim=-1) # (B, T, T)
+
+        wei = self.dropout(wei)
 
         # perform the weighted aggregation of the values
         v = self.value(x) # (B, T, head_size)
@@ -95,10 +102,11 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
         self.proj = nn.Linear(n_embd, n_embd)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         out = torch.cat([h(x) for h in self.heads], dim=-1)
-        out = self.proj(out)
+        out = self.dropout(self.proj(out))
         return out
 
 # This is applied to a token indiviually and identically
@@ -113,6 +121,7 @@ class FeedForward(nn.Module):
             nn.Linear(n_embd, 4* n_embd),
             nn.ReLU(),
             nn.Linear(4* n_embd, n_embd), # projection layer back into residual pathway
+            nn.Dropout(dropout)
         )
 
     def forward(self, x):
@@ -125,10 +134,12 @@ class Block(nn.Module):
         super().__init__()
         self.sa = MultiHeadAttention(n_head, n_embd//n_head) # 4 heads of self-attention
         self.ffwd = FeedForward(n_embd)
+        self.ln1 = nn.LayerNorm(n_embd)
+        self.ln2 = nn.LayerNorm(n_embd)
 
     def forward(self, x):
-        x = x + self.sa(x) # residual connection
-        x = x + self.ffwd(x) # residual connection: fork off do some computation and add back
+        x = x + self.sa(self.ln1(x)) # residual connection
+        x = x + self.ffwd(self.ln2(x)) # residual connection: fork off do some computation and add back
         return x
 
 
@@ -140,11 +151,8 @@ class BiGramLanguageModel(nn.Module):
         # Each token directly reads off the logits of the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
-        self.blocks = nn.Sequential(
-            Block(n_embd, 4),
-            Block(n_embd, 4),
-            Block(n_embd, 4),
-        ) # 3 transformer blocks
+        self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
+        self.ln_f = nn.LayerNorm(n_embd) # Final layer norm
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
     def forward(self, idx, targets=None):
